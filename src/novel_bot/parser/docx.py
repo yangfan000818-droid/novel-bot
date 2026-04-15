@@ -62,8 +62,8 @@ class DocxParser:
             else:
                 current_lines.append(text)
 
-        # Don't forget to last chapter
-        if current_title and current_lines:
+        # Don't forget the last chapter (may have empty content)
+        if current_title:
             chapters.append(
                 Chapter(
                     title=current_title,
