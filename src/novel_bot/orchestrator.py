@@ -95,7 +95,7 @@ class Orchestrator:
             chapters: List of chapters to publish.
             book_id: Optional book ID on the platform.
         """
-        logger = BookLogger(book_title)
+        logger: BookLogger(book_title)
         logger.info(f"开始发布流程，共 {len(chapters)} 章")
 
         pending = self._get_pending_chapters(book_title, chapters)
