@@ -1,5 +1,3 @@
-"""Parser base module with AI prefix cleaning and chapter splitting."""
-
 from __future__ import annotations
 
 import re
@@ -45,7 +43,7 @@ def clean_ai_prefix(content: str) -> str:
     1. If content starts with 💭, find transition point to real narrative
     2. If "---" separator exists, take content after it
     3. If "小说正文" or "正文" line exists, take content after it
-    4. Otherwise return content unchanged
+    4. Special case: "..." followed by narrative (common in AI-generated content)
 
     Args:
         content: Raw chapter content that may contain AI thinking prefix.
@@ -66,6 +64,41 @@ def clean_ai_prefix(content: str) -> str:
 
     # Check if AI thinking marker is present at all
     if not _THINKING_START.search(content[:50]):
+        return content
+
+    # Special case: detect "..." pattern (ellipsis followed by narrative)
+    # This is common in AI-generated content like "核心要素要保留：..."
+    _ELLIPSIS_PATTERN = re.compile(r"^\.\.\.\s*$", re.MULTILINE)
+    if _ELLIPSIS_PATTERN.search(content):
+        # Find the ellipsis marker
+        lines = content.split("\n")
+        ellipsis_idx = None
+        for i, line in enumerate(lines):
+            if _ELLIPSIS_PATTERN.match(line.strip()):
+                ellipsis_idx = i
+                break
+        
+        if ellipsis_idx is not None:
+            # Find first narrative line after ellipsis
+            narrative_start = ellipsis_idx + 1
+            for i in range(narrative_start, len(lines)):
+                line = lines[i].strip()
+                if not line:
+                    continue
+                # Check if this looks like narrative (not AI reasoning keywords)
+                first_chars = line[:4] if len(line) >= 4 else line
+                is_ai_reasoning = any(keyword in first_chars for keyword in _AI_REASONING_KEYWORDS)
+                has_emoji = "💭" in line[:4]
+                
+                if not is_ai_reasoning and not has_emoji and len(line) > 10:
+                    narrative_start = i
+                    break
+            
+            # Return everything from the first narrative line onwards
+            if narrative_start > 0:
+                return "\n".join(lines[narrative_start:]).strip()
+        
+        # If no narrative found after ellipsis, return content as-is
         return content
 
     # Fallback: filter out AI reasoning lines, keep the rest
@@ -139,7 +172,7 @@ def _split_markdown(content: str) -> list[Chapter]:
         else:
             current_lines.append(line)
 
-    # Don't forget the last chapter
+    # Don't forget to last chapter
     if current_title and current_lines:
         chapters.append(Chapter(
             title=current_title.lstrip("# "),
@@ -167,7 +200,7 @@ def _split_txt(content: str) -> list[Chapter]:
             if current_title and current_lines:
                 chapters.append(Chapter(
                     title=current_title,
-                    content="\n".join(current_lines).strip(),
+                    content=clean_ai_prefix("\n".join(current_lines).strip()),
                     index=len(chapters),
                 ))
             current_title = line.strip()
@@ -175,11 +208,11 @@ def _split_txt(content: str) -> list[Chapter]:
         else:
             current_lines.append(line)
 
-    # Don't forget the last chapter
+    # Don't forget to last chapter
     if current_title and current_lines:
         chapters.append(Chapter(
             title=current_title,
-            content="\n".join(current_lines).strip(),
+            content=clean_ai_prefix("\n".join(current_lines).strip()),
             index=len(chapters),
         ))
 
