@@ -1,0 +1,15 @@
+books_path: ../books
+
+publish:
+  delay_min: 5
+  delay_max: 15
+  headless: true
+
+login:
+  cookie_file: data/cookies.json
+
+progress:
+  file: data/progress.json
+
+logging:
+  dir: logs
