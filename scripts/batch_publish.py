@@ -64,6 +64,42 @@ def parse_chapter_file(filepath: Path) -> tuple[str, str]:
     return title, content.strip()
 
 
+# AI note leakage keywords (English + Chinese)
+_AI_NOTE_PATTERNS = re.compile(
+    r"Current count|让我分析|压缩策略|保留.*必须|精简|扩写|HOOK|"
+    r"Key (plot|characters|objects)|Setting/World|"
+    r"伏笔|核心情感|关键转折|字数控制|目标区间|"
+    r"我认为|这个版本|需要进一步|不要在正文"
+)
+
+_MIN_CONTENT_LENGTH = 500
+
+
+def validate_chapter(title: str, content: str, filepath: Path) -> list[str]:
+    """Validate parsed chapter content. Returns list of issues (empty = OK)."""
+    issues: list[str] = []
+
+    if not content:
+        issues.append("正文为空")
+        return issues
+
+    if len(content) < _MIN_CONTENT_LENGTH:
+        issues.append(f"正文过短 ({len(content)} 字 < {_MIN_CONTENT_LENGTH})")
+
+    # Check first 500 chars for AI note leakage
+    head = content[:500]
+    if _AI_NOTE_PATTERNS.search(head):
+        issues.append("疑似 AI 笔记泄漏（正文中检测到 AI 关键词）")
+
+    # Check for residual markdown markers
+    if re.search(r"^#{1,3}\s", content, re.MULTILINE):
+        issues.append("正文含有残留的 # 标题标记")
+    if content.startswith("```") or content.endswith("```"):
+        issues.append("正文含有残留的代码块标记")
+
+    return issues
+
+
 def load_chapters(start: int = 1, end: int | None = None) -> list[Chapter]:
     """Load and parse chapter files from the book directory."""
     files = sorted(CHAPTERS_DIR.glob("*.md"))
@@ -79,8 +115,13 @@ def load_chapters(start: int = 1, end: int | None = None) -> list[Chapter]:
             break
 
         title, content = parse_chapter_file(filepath)
+
+        # Validate content format
+        issues = validate_chapter(title, content, filepath)
+        if issues:
+            print(f"  ⚠ {filepath.name}: {'; '.join(issues)}")
+
         if not content:
-            print(f"Warning: {filepath.name} has no content after parsing")
             continue
 
         chapters.append(Chapter(title=title, content=content, index=i))
@@ -186,9 +227,21 @@ def main() -> None:
         print("没有可发布的章节")
         return
 
-    print(f"共 {len(chapters)} 章:")
+    print(f"\n共 {len(chapters)} 章:")
+    has_issues = False
     for ch in chapters:
-        print(f"  {ch.index}. {ch.title} ({len(ch.content)} 字)")
+        issues = validate_chapter(ch.title, ch.content, Path("."))
+        status = f"  ⚠ {ch.index}. {ch.title} ({len(ch.content)} 字) — {'; '.join(issues)}" if issues else f"  ✓ {ch.index}. {ch.title} ({len(ch.content)} 字)"
+        print(status)
+        if issues:
+            has_issues = True
+
+    if has_issues:
+        print("\n⚠ 以上章节存在问题，是否继续？(y/N) ", end="")
+        confirm = input().strip().lower()
+        if confirm != "y":
+            print("已取消")
+            return
 
     # Parse publish time
     publish_time: int | None = None
