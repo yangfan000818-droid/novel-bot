@@ -49,7 +49,13 @@ class TomatoPublisher(BasePublisher):
             "Navigate to the dashboard manually and click 创建新书."
         )
 
-    async def publish_chapter(self, page: Page, book_id: str, chapter: Chapter) -> bool:
+    async def publish_chapter(
+        self,
+        page: Page,
+        book_id: str,
+        chapter: Chapter,
+        publish_time: int | None = None,
+    ) -> bool:
         """Publish a single chapter via the Tomato Novel API.
 
         1. Navigate to publish page → triggers new_article API (auto-creates draft)
@@ -61,6 +67,8 @@ class TomatoPublisher(BasePublisher):
             page: Authenticated Playwright Page.
             book_id: Target book ID.
             chapter: Chapter with title and content.
+            publish_time: Unix timestamp for scheduled publish.
+                None = publish immediately.
 
         Returns:
             True if published successfully.
@@ -124,15 +132,35 @@ class TomatoPublisher(BasePublisher):
         logger.info("Draft saved: latest_version=%s", save_data.get("data", {}).get("latest_version"))
 
         # Step 4: Publish via publish_article
-        logger.info("Publishing via publish_article API")
-        pub_result = await self._api_call(page, "/api/author/publish_article/v0/", {
+        pub_params: dict = {
             "book_id": book_id,
             "item_id": item_id,
             "title": chapter.title,
             "content": content_html,
             "volume_id": volume_id,
             "volume_name": volume_name,
-        })
+        }
+        if publish_time is not None:
+            pub_params.update({
+                "timer_status": "1",
+                "timer_time": str(publish_time),
+                "publish_status": "1",
+                "device_platform": "pc",
+                "speak_type": "0",
+                "use_ai": "1",
+                "timer_chapter_preview": "[]",
+                "has_chapter_ad": "false",
+                "need_pay": "0",
+            })
+            logger.info(
+                "Scheduled publish at %d via publish_article API",
+                publish_time,
+            )
+        else:
+            logger.info("Publishing immediately via publish_article API")
+        pub_result = await self._api_call(
+            page, "/api/author/publish_article/v0/", pub_params,
+        )
 
         pub_data = json.loads(pub_result)
         if pub_data.get("code") != 0:

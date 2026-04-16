@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from playwright.async_api import async_playwright
@@ -90,8 +91,19 @@ async def publish_all(
     chapters: list[Chapter],
     delay_min: int = 3,
     delay_max: int = 8,
+    publish_time: int | None = None,
+    publish_interval: int = 30,
 ) -> None:
-    """Publish all chapters sequentially."""
+    """Publish all chapters sequentially.
+
+    Args:
+        chapters: List of chapters to publish.
+        delay_min: Min delay between chapters (seconds).
+        delay_max: Max delay between chapters (seconds).
+        publish_time: Unix timestamp for first chapter's scheduled publish.
+            None = publish immediately.
+        publish_interval: Minutes between scheduled chapter times.
+    """
     with open(COOKIE_FILE, "r", encoding="utf-8") as f:
         cookies = json.load(f)
 
@@ -107,13 +119,23 @@ async def publish_all(
         fail_count = 0
 
         for i, chapter in enumerate(chapters, start=1):
+            # Calculate scheduled time for this chapter
+            chapter_publish_time: int | None = None
+            if publish_time is not None:
+                chapter_publish_time = publish_time + (i - 1) * publish_interval * 60
+                scheduled_dt = datetime.fromtimestamp(chapter_publish_time)
+                time_str = scheduled_dt.strftime("%Y-%m-%d %H:%M")
+            else:
+                time_str = "立即"
+
             print(
                 f"\n[{i}/{len(chapters)}] "
-                f"发布: {chapter.title} ({len(chapter.content)} 字)"
+                f"发布: {chapter.title} ({len(chapter.content)} 字) [{time_str}]"
             )
             try:
                 result = await publisher.publish_chapter(
-                    page, book_id=BOOK_ID, chapter=chapter
+                    page, book_id=BOOK_ID, chapter=chapter,
+                    publish_time=chapter_publish_time,
                 )
                 if result:
                     success_count += 1
@@ -143,6 +165,18 @@ def main() -> None:
     parser.add_argument(
         "--delay-max", type=int, default=8, help="章节间最大延迟秒数"
     )
+    parser.add_argument(
+        "--publish-time",
+        type=str,
+        default=None,
+        help='定时发布首章时间，格式 "YYYY-MM-DD HH:MM"（默认：立即发布）',
+    )
+    parser.add_argument(
+        "--publish-interval",
+        type=int,
+        default=30,
+        help="定时发布章节间隔分钟数（默认：30）",
+    )
     args = parser.parse_args()
 
     chapters = load_chapters(args.start, args.end)
@@ -155,6 +189,16 @@ def main() -> None:
     for ch in chapters:
         print(f"  {ch.index}. {ch.title} ({len(ch.content)} 字)")
 
+    # Parse publish time
+    publish_time: int | None = None
+    if args.publish_time:
+        try:
+            dt = datetime.strptime(args.publish_time, "%Y-%m-%d %H:%M")
+            publish_time = int(dt.timestamp())
+        except ValueError:
+            print(f"时间格式错误: {args.publish_time}，请使用 YYYY-MM-DD HH:MM")
+            return
+
     if args.dry_run:
         print(f"\n--- 第一章内容预览 ({chapters[0].title}) ---")
         print(chapters[0].content[:500])
@@ -165,7 +209,11 @@ def main() -> None:
         return
 
     print()
-    asyncio.run(publish_all(chapters, args.delay_min, args.delay_max))
+    asyncio.run(publish_all(
+        chapters, args.delay_min, args.delay_max,
+        publish_time=publish_time,
+        publish_interval=args.publish_interval,
+    ))
 
 
 if __name__ == "__main__":
