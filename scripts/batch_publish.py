@@ -22,11 +22,11 @@ def parse_chapter_file(filepath: Path) -> tuple[str, str]:
     """Parse a chapter file. Returns (title, content).
 
     New format:
-      - Filename: ``NNNN_第N章_标题.md``
+      - Filename: ``NNNN_第N章_标题.txt``
       - Title extracted from filename (part after the number prefix)
       - Content is the entire file text (pure story)
     """
-    # Title: "0001_第一章_灵根试炼" → "第一章 灵根试炼"
+    # Title: "0001_第一章_灵根试炼.txt" → "第一章 灵根试炼"
     stem = filepath.stem
     title_part = re.sub(r"^\d+_", "", stem)
     title = title_part.replace("_", " ")
@@ -37,7 +37,7 @@ def parse_chapter_file(filepath: Path) -> tuple[str, str]:
 
 def load_chapters(start: int = 1, end: int | None = None) -> list[Chapter]:
     """Load and parse chapter files from the book directory."""
-    files = sorted(CHAPTERS_DIR.glob("*.md"))
+    files = sorted(CHAPTERS_DIR.glob("*.txt"))
     if not files:
         print(f"No chapter files found in {CHAPTERS_DIR}")
         sys.exit(1)
