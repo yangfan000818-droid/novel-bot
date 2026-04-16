@@ -1,7 +1,18 @@
-"""Tomato Novel platform publisher implementation."""
+"""Tomato Novel platform publisher implementation.
+
+Publishes chapters via the fanqienovel.com author backend using
+direct API calls through the authenticated browser context.
+
+API flow:
+  1. POST /api/author/article/new_article/v0/  → create draft, get item_id
+  2. POST /api/author/article/cover_article/v0/ → save content (title + HTML)
+  3. POST /api/author/publish_article/v0/       → submit for publishing
+"""
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import random
 from typing import TYPE_CHECKING
 
@@ -11,96 +22,180 @@ from novel_bot.publisher.base import BasePublisher
 if TYPE_CHECKING:
     from playwright.async_api import Page
 
-TOMATO_AUTHOR_URL = "https://writer.tomatofn.com"
+logger = logging.getLogger(__name__)
+
+TOMATO_AUTHOR_URL = "https://fanqienovel.com/main/writer"
 
 
 class TomatoPublisher(BasePublisher):
-    """Publisher for Tomato Novel (番茄小说) platform."""
+    """Publisher for Tomato Novel (番茄小说) platform.
+
+    Uses the author backend at fanqienovel.com/main/writer/.
+    Chapters are published via direct API calls through the
+    authenticated Playwright browser context.
+    """
 
     RETRY_NETWORK = 3
     RETRY_PUBLISH = 3
     RETRY_STRUCTURE = 0
 
     def __init__(self, delay_min: int = 5, delay_max: int = 15) -> None:
-        """Initialize Tomato publisher.
-
-        Args:
-            delay_min: Minimum delay between chapter publishes (seconds).
-            delay_max: Maximum delay between chapter publishes (seconds).
-        """
         self.delay_min = delay_min
         self.delay_max = delay_max
 
     async def create_book(self, page: Page, title: str, **kwargs) -> str:
-        """Navigate to create book page and fill in book info.
-
-        Args:
-            page: Playwright Page object.
-            title: Title of the book to create.
-            **kwargs: Optional description and genre.
-
-        Returns:
-            Extracted book ID from URL or page.
-        """
-        await page.goto(f"{TOMATO_AUTHOR_URL}/book/create")
-
-        await page.fill('input[name="title"]', title)
-
-        description = kwargs.get("description", "")
-        if description:
-            await page.fill('textarea[name="description"]', description)
-
-        genre = kwargs.get("genre", "")
-        if genre:
-            await page.select_option('select[name="genre"]', genre)
-
-        await page.click('button[type="submit"]')
-        await page.wait_for_load_state("networkidle")
-
-        return await self._extract_book_id(page)
+        raise NotImplementedError(
+            "create_book requires headed browser mode. "
+            "Navigate to the dashboard manually and click 创建新书."
+        )
 
     async def publish_chapter(self, page: Page, book_id: str, chapter: Chapter) -> bool:
-        """Publish a single chapter to an existing book.
+        """Publish a single chapter via the Tomato Novel API.
+
+        1. Navigate to publish page → triggers new_article API (auto-creates draft)
+        2. Convert plain-text content to HTML
+        3. Call cover_article API directly (saves content)
+        4. Call publish_article API to submit chapter for publishing
 
         Args:
-            page: Playwright Page object.
-            book_id: ID of the book to publish to.
-            chapter: Chapter object with title and content.
+            page: Authenticated Playwright Page.
+            book_id: Target book ID.
+            chapter: Chapter with title and content.
 
         Returns:
-            True on success.
+            True if published successfully.
         """
-        await page.goto(f"{TOMATO_AUTHOR_URL}/book/{book_id}/chapter/create")
+        publish_url = f"{TOMATO_AUTHOR_URL}/{book_id}/publish/"
+        logger.info("Navigating to publish page: %s", publish_url)
 
-        await page.fill('input[name="title"]', chapter.title)
-        await page.fill('textarea[name="content"]', chapter.content)
+        # Step 1: Navigate — the SPA auto-calls new_article to create a draft
+        # Set up response listener BEFORE navigation
+        article_info: dict = {}
 
-        await page.click('button[type="submit"]')
-        await page.wait_for_load_state("networkidle")
+        async def on_new_article(response):
+            url = response.url
+            if "new_article" in url and "monitor" not in url:
+                try:
+                    body = await response.text()
+                    data = json.loads(body)
+                    if data.get("code") == 0:
+                        article_info["item_id"] = data["data"]["item_id"]
+                        article_info["volume_id"] = data["data"]["volume_id"]
+                        article_info["volume_name"] = data["data"]["volume_data"][0]["volume_name"]
+                except Exception:
+                    pass
+
+        page.on("response", on_new_article)
+        await page.goto(publish_url, timeout=30000)
+        title_input = page.locator('input[placeholder="请输入标题"]')
+        await title_input.wait_for(state="visible", timeout=30000)
+        await page.wait_for_timeout(3000)
+
+        if not article_info.get("item_id"):
+            logger.error("Failed to get item_id from new_article API")
+            return False
+
+        item_id = article_info["item_id"]
+        volume_id = article_info["volume_id"]
+        volume_name = article_info["volume_name"]
+        logger.info("Draft created: item_id=%s", item_id)
+
+        # Step 2: Convert plain text to HTML (skip editor typing entirely)
+        content_html = self._content_to_html(chapter.content)
+        logger.info(
+            "Content prepared: %d chars plain → %d chars HTML",
+            len(chapter.content),
+            len(content_html),
+        )
+
+        # Step 3: Save draft via cover_article
+        logger.info("Saving draft via cover_article API")
+        save_result = await self._api_call(page, "/api/author/article/cover_article/v0/", {
+            "book_id": book_id,
+            "item_id": item_id,
+            "title": chapter.title,
+            "content": content_html,
+            "volume_id": volume_id,
+            "volume_name": volume_name,
+        })
+
+        save_data = json.loads(save_result)
+        if save_data.get("code") != 0:
+            logger.error("cover_article failed: %s", save_result)
+            return False
+        logger.info("Draft saved: latest_version=%s", save_data.get("data", {}).get("latest_version"))
+
+        # Step 4: Publish via publish_article
+        logger.info("Publishing via publish_article API")
+        pub_result = await self._api_call(page, "/api/author/publish_article/v0/", {
+            "book_id": book_id,
+            "item_id": item_id,
+            "title": chapter.title,
+            "content": content_html,
+            "volume_id": volume_id,
+            "volume_name": volume_name,
+        })
+
+        pub_data = json.loads(pub_result)
+        if pub_data.get("code") != 0:
+            logger.error("publish_article failed: %s", pub_result)
+            return False
+
+        logger.info("Chapter published: item_id=%s", pub_data.get("data", {}).get("item_id"))
 
         await self._wait_random_delay()
         return True
 
-    async def _extract_book_id(self, page: Page) -> str:
-        """Extract book ID from current page URL after creation.
+    @staticmethod
+    def _content_to_html(text: str) -> str:
+        """Convert plain-text chapter content to HTML for the API.
+
+        Splits on double-newlines to create paragraphs wrapped in <p> tags.
+        Single newlines within a paragraph are converted to <br> tags.
+        """
+        paragraphs = text.split("\n\n")
+        html_parts: list[str] = []
+        for para in paragraphs:
+            stripped = para.strip()
+            if not stripped:
+                continue
+            # Convert single newlines within a paragraph to <br>
+            inner = stripped.replace("\n", "<br>")
+            html_parts.append(f"<p>{inner}</p>")
+        return "".join(html_parts)
+
+    @staticmethod
+    async def _api_call(page: Page, endpoint: str, params: dict) -> str:
+        """Make an authenticated API call via in-page fetch.
+
+        Uses the browser's authenticated session (cookies/csrf)
+        to call the Tomato Novel author API directly.
 
         Args:
-            page: Playwright Page object.
+            page: Authenticated Playwright Page.
+            endpoint: API endpoint path (e.g. "/api/author/article/cover_article/v0/").
+            params: Form data parameters.
 
         Returns:
-            Extracted book ID string.
-
-        Raises:
-            ValueError: If book ID cannot be extracted.
+            Response body as string.
         """
-        url = page.url
-        parts = url.rstrip("/").split("/")
-        for i, part in enumerate(parts):
-            if part == "book" and i + 1 < len(parts):
-                return parts[i + 1]
-        raise ValueError(f"Cannot extract book ID from URL: {url}")
+        return await page.evaluate("""async (p) => {
+            const fd = new URLSearchParams();
+            fd.append('aid', '2503');
+            fd.append('app_name', 'muye_novel');
+            for (const [k, v] of Object.entries(p.params)) {
+                fd.append(k, v);
+            }
+            const r = await fetch(p.endpoint, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'},
+                body: fd.toString(),
+                credentials: 'include',
+            });
+            return await r.text();
+        }""", {"endpoint": endpoint, "params": params})
 
     async def _wait_random_delay(self) -> None:
-        """Wait for a random duration between min and max."""
         delay = random.uniform(self.delay_min, self.delay_max)
+        logger.debug("Waiting %.1f seconds", delay)
         await asyncio.sleep(delay)

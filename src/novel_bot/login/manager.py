@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -10,7 +11,9 @@ from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-TOMATO_AUTHOR_URL = "https://writer.tomatofn.com"
+logger = logging.getLogger(__name__)
+
+TOMATO_DASHBOARD_URL = "https://fanqienovel.com/main/writer/"
 
 
 class LoginManager:
@@ -67,7 +70,7 @@ class LoginManager:
             browser = await p.chromium.launch(headless=False)
             context = await browser.new_context()
             page = await context.new_page()
-            await page.goto(TOMATO_AUTHOR_URL)
+            await page.goto(TOMATO_DASHBOARD_URL)
 
             print("请在浏览器中完成登录，登录完成后按 Enter...")
             input()
@@ -93,6 +96,7 @@ class LoginManager:
         """
         cookies = self.load_cookies()
         if not cookies:
+            logger.info("No cookies found, starting first login...")
             return await self.first_login()
 
         async with async_playwright() as p:
@@ -100,13 +104,23 @@ class LoginManager:
             context = await browser.new_context()
             await context.add_cookies(cookies)
             page = await context.new_page()
-            await page.goto(TOMATO_AUTHOR_URL)
+            await page.goto(TOMATO_DASHBOARD_URL, timeout=30000)
 
-            # Check if redirected to login page
+            # Wait for SPA to render
+            try:
+                await page.wait_for_selector(
+                    "#app > div:not(:empty)", timeout=15000
+                )
+            except Exception:
+                pass
+            await page.wait_for_timeout(3000)
+
+            # Check if redirected to login
             current_url = page.url
             if "login" in current_url.lower():
-                print("Cookie 已失效，请重新登录...")
+                logger.warning("Cookie expired, redirect to login page")
                 await browser.close()
                 return await self.first_login()
 
+            logger.info("Session established: %s", current_url)
             return page
