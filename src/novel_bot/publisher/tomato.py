@@ -92,8 +92,7 @@ class TomatoPublisher(BasePublisher):
         await page.wait_for_timeout(3000)
 
         if not article_info.get("item_id"):
-            logger.error("Failed to get item_id from new_article API")
-            return False
+            raise RuntimeError("Failed to get item_id from new_article API")
 
         item_id = article_info["item_id"]
         volume_id = article_info["volume_id"]
@@ -121,8 +120,7 @@ class TomatoPublisher(BasePublisher):
 
         save_data = json.loads(save_result)
         if save_data.get("code") != 0:
-            logger.error("cover_article failed: %s", save_result)
-            return False
+            raise RuntimeError(f"cover_article failed: {save_result}")
         logger.info("Draft saved: latest_version=%s", save_data.get("data", {}).get("latest_version"))
 
         # Step 4: Publish via publish_article
@@ -138,8 +136,7 @@ class TomatoPublisher(BasePublisher):
 
         pub_data = json.loads(pub_result)
         if pub_data.get("code") != 0:
-            logger.error("publish_article failed: %s", pub_result)
-            return False
+            raise RuntimeError(f"publish_article failed: {pub_result}")
 
         logger.info("Chapter published: item_id=%s", pub_data.get("data", {}).get("item_id"))
 

@@ -120,10 +120,12 @@ async def publish_all(
                     print("  -> 成功")
                 else:
                     fail_count += 1
-                    print("  -> 失败 (API 返回错误)")
+                    print("  -> 失败 (API 返回错误)，停止发布")
+                    break
             except Exception as e:
                 fail_count += 1
-                print(f"  -> 错误: {e}")
+                print(f"  -> 错误: {e}，停止发布")
+                break
 
         await browser.close()
 

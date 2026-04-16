@@ -45,10 +45,9 @@ class TestTomatoPublisher:
         chapter = Chapter(title="第1章 测试", content="正文内容", index=0)
 
         with patch.object(publisher, "_wait_random_delay", new_callable=AsyncMock):
-            result = await publisher.publish_chapter(page, book_id="123", chapter=chapter)
+            with pytest.raises(RuntimeError, match="item_id"):
+                await publisher.publish_chapter(page, book_id="123", chapter=chapter)
 
-        # Returns False because no new_article handler fired (no item_id)
-        assert result is False
         assert page.goto.called
 
     def test_retry_policy_from_spec(self) -> None:
@@ -72,8 +71,8 @@ class TestTomatoPublisher:
         assert json.loads(result)["code"] == 0
 
     @pytest.mark.asyncio
-    async def test_publish_returns_false_on_api_error(self) -> None:
-        """Test publish_chapter returns False when cover_article fails."""
+    async def test_publish_raises_on_no_item_id(self) -> None:
+        """Test publish_chapter raises when new_article gives no item_id."""
         mock_locator = AsyncMock()
         mock_locator.wait_for = AsyncMock()
 
@@ -83,19 +82,17 @@ class TestTomatoPublisher:
         page.wait_for_timeout = AsyncMock()
 
         page.evaluate = AsyncMock(side_effect=[
-            '{"code":-1,"message":"error"}',  # cover_article fails
+            '{"code":-1,"message":"error"}',
         ])
 
         publisher = TomatoPublisher(delay_min=0, delay_max=0)
 
         with patch.object(publisher, "_wait_random_delay", new_callable=AsyncMock):
-            result = await publisher.publish_chapter(
-                page, book_id="123",
-                chapter=Chapter(title="test", content="content", index=0),
-            )
-
-        # Returns False because article_info is empty (no item_id)
-        assert result is False
+            with pytest.raises(RuntimeError, match="item_id"):
+                await publisher.publish_chapter(
+                    page, book_id="123",
+                    chapter=Chapter(title="test", content="content", index=0),
+                )
 
     def test_content_to_html_paragraphs(self) -> None:
         """Test _content_to_html wraps paragraphs in <p> tags."""
