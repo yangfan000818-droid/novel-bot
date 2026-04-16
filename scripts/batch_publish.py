@@ -13,7 +13,7 @@ from novel_bot.models import Chapter
 from novel_bot.publisher.tomato import TomatoPublisher
 
 BOOK_DIR = Path("/Users/yfan/work/xs/books/太初破灭")
-CHAPTERS_DIR = BOOK_DIR / "chapters"
+CHAPTERS_DIR = BOOK_DIR / "txt"
 COOKIE_FILE = Path("data/cookies.json")
 BOOK_ID = "7629145838731676697"
 
