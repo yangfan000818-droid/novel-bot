@@ -2,7 +2,6 @@
 import argparse
 import asyncio
 import json
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -12,8 +11,8 @@ from playwright.async_api import async_playwright
 from novel_bot.models import Chapter
 from novel_bot.publisher.tomato import TomatoPublisher
 
-BOOKS_ROOT = Path("/Users/yfan/work/xs/books")
-COOKIE_FILE = Path("data/cookies.json")
+INKOS_BOOKS_DIR = Path("books")
+BROWSER_DATA_DIR = Path("data/browser_data")
 BOOKS_CONFIG_FILE = Path("data/books.json")
 
 
@@ -36,13 +35,12 @@ def save_books_config(config: dict) -> None:
         json.dump(config, f, ensure_ascii=False, indent=2)
 
 
-def resolve_book(book_name: str, book_id_override: str | None = None) -> tuple[Path, Path, str]:
-    """Resolve book paths and ID from book name.
+def resolve_book(book_name: str, book_id_override: str | None = None) -> tuple[Path, str]:
+    """Resolve book directory and ID from book name.
 
-    Returns (book_dir, chapters_dir, book_id).
+    Returns (book_dir, book_id).
     """
-    book_dir = BOOKS_ROOT / book_name
-    chapters_dir = book_dir / "txt"
+    book_dir = INKOS_BOOKS_DIR / book_name
 
     if not book_dir.exists():
         print(f"书籍目录不存在: {book_dir}")
@@ -54,12 +52,11 @@ def resolve_book(book_name: str, book_id_override: str | None = None) -> tuple[P
         print(f"未找到书籍 {book_name} 的 book_id，请使用 --book-id 指定")
         sys.exit(1)
 
-    # Auto-save to config if using --book-id and not yet recorded
     if book_id_override and config.get(book_name, {}).get("book_id") != book_id_override:
         config.setdefault(book_name, {})["book_id"] = book_id_override
         save_books_config(config)
 
-    return book_dir, chapters_dir, book_id
+    return book_dir, book_id
 
 
 # ---------------------------------------------------------------------------
@@ -143,40 +140,58 @@ def check_publish_time(state: dict, requested_time: int | None) -> int | None:
 # Chapter file parsing
 # ---------------------------------------------------------------------------
 
-def parse_chapter_file(filepath: Path) -> tuple[str, str]:
-    """Parse a chapter file. Returns (title, content).
-
-    Filename format: ``第N章_标题.txt``
-      - Title extracted from filename
-      - Content is the entire file text (pure story)
-    """
+def parse_inkos_chapter(filepath: Path) -> tuple[int, str, str]:
+    """Parse an inkos chapter .md file. Returns (chapter_number, title, content)."""
     stem = filepath.stem
-    title_part = re.sub(r"^\d+_", "", stem)
-    title = title_part.replace("_", " ")
-    content = filepath.read_text(encoding="utf-8").strip()
-    return title, content
+    parts = stem.split("_", 1)
+    chapter_number = int(parts[0])
+    title = parts[1] if len(parts) > 1 else f"第{chapter_number}章"
+
+    text = filepath.read_text(encoding="utf-8")
+    lines = text.split("\n")
+
+    # Skip "# 第N章 标题" heading
+    idx = 0
+    if lines and lines[0].startswith("# "):
+        idx = 1
+
+    # Skip blank lines after heading
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+
+    # Skip repeated title line (e.g. "第一章 深渊觉醒")
+    if idx < len(lines) and lines[idx].strip():
+        idx += 1
+
+    # Skip blank lines after repeated title
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+
+    content = "\n".join(lines[idx:]).strip()
+    return chapter_number, title, content
 
 
-def load_chapters(chapters_dir: Path, start: int = 1, end: int | None = None) -> list[Chapter]:
-    """Load and parse chapter files from the book directory."""
-    files = sorted(chapters_dir.glob("*.txt"))
+def load_chapters(book_dir: Path, start: int = 1, end: int | None = None) -> list[Chapter]:
+    """Load and parse inkos chapter files from the book's chapters/ directory."""
+    chapters_dir = book_dir / "chapters"
+    files = sorted(chapters_dir.glob("*.md"))
     if not files:
         print(f"No chapter files found in {chapters_dir}")
         sys.exit(1)
 
     chapters: list[Chapter] = []
-    for i, filepath in enumerate(files, start=1):
-        if i < start:
+    for filepath in files:
+        chapter_number, title, content = parse_inkos_chapter(filepath)
+        if chapter_number < start:
             continue
-        if end is not None and i > end:
+        if end is not None and chapter_number > end:
             break
-
-        title, content = parse_chapter_file(filepath)
         if not content:
             print(f"  ⚠ {filepath.name}: 正文为空")
             continue
-
-        chapters.append(Chapter(title=title, content=content, index=i))
+        # Prepend chapter number for platform title requirements
+        full_title = f"第{chapter_number}章 {title}"
+        chapters.append(Chapter(title=full_title, content=content, index=chapter_number))
 
     return chapters
 
@@ -197,14 +212,19 @@ async def publish_all(
     """Publish all chapters sequentially with state tracking."""
     state = load_state(book_name)
 
-    with open(COOKIE_FILE, "r", encoding="utf-8") as f:
-        cookies = json.load(f)
+    if not BROWSER_DATA_DIR.exists():
+        print(f"未找到浏览器数据目录: {BROWSER_DATA_DIR}")
+        print("请先运行登录脚本: .venv/bin/python login_interactive.py")
+        sys.exit(1)
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
-        await context.add_cookies(cookies)
-        page = await context.new_page()
+        context = await p.chromium.launch_persistent_context(
+            str(BROWSER_DATA_DIR),
+            headless=True,
+            viewport={'width': 1280, 'height': 800},
+            args=['--disable-blink-features=AutomationControlled'],
+        )
+        page = context.pages[0] if context.pages else await context.new_page()
 
         publisher = TomatoPublisher(delay_min=delay_min, delay_max=delay_max)
 
@@ -242,7 +262,7 @@ async def publish_all(
                     record_chapter(state, chapter.index, chapter.title, chapter_publish_time, "failed")
                 break
 
-        await browser.close()
+        await context.close()
 
     print(f"\n完成: {success_count} 成功, {fail_count} 失败")
 
@@ -281,7 +301,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    book_dir, chapters_dir, book_id = resolve_book(args.book, args.book_id)
+    book_dir, book_id = resolve_book(args.book, args.book_id)
 
     state = load_state(args.book)
 
@@ -304,7 +324,7 @@ def main() -> None:
     if args.start is None:
         args.start = get_next_chapter_index(state)
 
-    chapters = load_chapters(chapters_dir, args.start, args.end)
+    chapters = load_chapters(book_dir, args.start, args.end)
 
     if not chapters:
         print("没有可发布的章节")

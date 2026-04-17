@@ -1,18 +1,27 @@
+.env
+node_modules/
+.DS_Store
+
+# inkos generated books
+books/
+
+# Browser auth data
+data/browser_data/
+data/cookies.json
+data/local_storage.json
+data/storage_state.json
+
+# Data files
+data/*.png
+data/*.html
+data/briefs/
+
 # Python
 __pycache__/
 *.pyc
 *.pyo
 .venv/
 
-# Data (screenshots, HTML captures, cookies, state files)
-data/*.png
-data/*.html
-data/cookies.json
-data/publish_state_*.json
-
 # IDE
 .vscode/
 .idea/
-
-# OS
-.DS_Store
