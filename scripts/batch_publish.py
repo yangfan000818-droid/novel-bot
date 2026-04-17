@@ -12,29 +12,80 @@ from playwright.async_api import async_playwright
 from novel_bot.models import Chapter
 from novel_bot.publisher.tomato import TomatoPublisher
 
-BOOK_DIR = Path("/Users/yfan/work/xs/books/太初破灭")
-CHAPTERS_DIR = BOOK_DIR / "txt"
+BOOKS_ROOT = Path("/Users/yfan/work/xs/books")
 COOKIE_FILE = Path("data/cookies.json")
-STATE_FILE = Path("data/publish_state.json")
-BOOK_ID = "7629145838731676697"
+BOOKS_CONFIG_FILE = Path("data/books.json")
+
+
+# ---------------------------------------------------------------------------
+# Books config
+# ---------------------------------------------------------------------------
+
+def load_books_config() -> dict:
+    """Load books configuration mapping book names to Tomato Novel book IDs."""
+    if BOOKS_CONFIG_FILE.exists():
+        with open(BOOKS_CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def save_books_config(config: dict) -> None:
+    """Persist books configuration to disk."""
+    BOOKS_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(BOOKS_CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
+
+def resolve_book(book_name: str, book_id_override: str | None = None) -> tuple[Path, Path, str]:
+    """Resolve book paths and ID from book name.
+
+    Returns (book_dir, chapters_dir, book_id).
+    """
+    book_dir = BOOKS_ROOT / book_name
+    chapters_dir = book_dir / "txt"
+
+    if not book_dir.exists():
+        print(f"书籍目录不存在: {book_dir}")
+        sys.exit(1)
+
+    config = load_books_config()
+    book_id = book_id_override or config.get(book_name, {}).get("book_id")
+    if not book_id:
+        print(f"未找到书籍 {book_name} 的 book_id，请使用 --book-id 指定")
+        sys.exit(1)
+
+    # Auto-save to config if using --book-id and not yet recorded
+    if book_id_override and config.get(book_name, {}).get("book_id") != book_id_override:
+        config.setdefault(book_name, {})["book_id"] = book_id_override
+        save_books_config(config)
+
+    return book_dir, chapters_dir, book_id
 
 
 # ---------------------------------------------------------------------------
 # Publish state management
 # ---------------------------------------------------------------------------
 
-def load_state() -> dict:
+def get_state_file(book_name: str) -> Path:
+    """Get the per-book state file path."""
+    return Path("data") / f"publish_state_{book_name}.json"
+
+
+def load_state(book_name: str) -> dict:
     """Load publish state from disk. Returns empty state if not found."""
-    if STATE_FILE.exists():
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
+    state_file = get_state_file(book_name)
+    if state_file.exists():
+        with open(state_file, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {"book_id": BOOK_ID, "chapters": [], "last_publish_time": 0}
+    return {"book_name": book_name, "chapters": [], "last_publish_time": 0}
 
 
 def save_state(state: dict) -> None:
     """Persist publish state to disk."""
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
+    book_name = state.get("book_name", "unknown")
+    state_file = get_state_file(book_name)
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(state_file, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
@@ -106,11 +157,11 @@ def parse_chapter_file(filepath: Path) -> tuple[str, str]:
     return title, content
 
 
-def load_chapters(start: int = 1, end: int | None = None) -> list[Chapter]:
+def load_chapters(chapters_dir: Path, start: int = 1, end: int | None = None) -> list[Chapter]:
     """Load and parse chapter files from the book directory."""
-    files = sorted(CHAPTERS_DIR.glob("*.txt"))
+    files = sorted(chapters_dir.glob("*.txt"))
     if not files:
-        print(f"No chapter files found in {CHAPTERS_DIR}")
+        print(f"No chapter files found in {chapters_dir}")
         sys.exit(1)
 
     chapters: list[Chapter] = []
@@ -136,13 +187,15 @@ def load_chapters(start: int = 1, end: int | None = None) -> list[Chapter]:
 
 async def publish_all(
     chapters: list[Chapter],
+    book_name: str,
+    book_id: str,
     delay_min: int = 3,
     delay_max: int = 8,
     publish_time: int | None = None,
     publish_interval: int = 30,
 ) -> None:
     """Publish all chapters sequentially with state tracking."""
-    state = load_state()
+    state = load_state(book_name)
 
     with open(COOKIE_FILE, "r", encoding="utf-8") as f:
         cookies = json.load(f)
@@ -172,7 +225,7 @@ async def publish_all(
             )
             try:
                 result = await publisher.publish_chapter(
-                    page, book_id=BOOK_ID, chapter=chapter,
+                    page, book_id=book_id, chapter=chapter,
                     publish_time=chapter_publish_time,
                 )
                 if result:
@@ -200,6 +253,8 @@ async def publish_all(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="批量发布章节到番茄小说")
+    parser.add_argument("--book", type=str, required=True, help="书籍名称（对应 books/ 下的目录名）")
+    parser.add_argument("--book-id", type=str, default=None, help="番茄小说书籍 ID（首次指定后自动保存）")
     parser.add_argument("--start", type=int, default=None, help="起始章节号 (默认: 接续上次)")
     parser.add_argument("--end", type=int, default=None, help="结束章节号 (默认: 全部)")
     parser.add_argument("--dry-run", action="store_true", help="仅解析不发布")
@@ -226,10 +281,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    state = load_state()
+    book_dir, chapters_dir, book_id = resolve_book(args.book, args.book_id)
+
+    state = load_state(args.book)
 
     # --status: show publish history and exit
     if args.status:
+        print(f"书籍: {args.book} (ID: {book_id})")
         if not state["chapters"]:
             print("暂无发布记录")
         else:
@@ -246,13 +304,14 @@ def main() -> None:
     if args.start is None:
         args.start = get_next_chapter_index(state)
 
-    chapters = load_chapters(args.start, args.end)
+    chapters = load_chapters(chapters_dir, args.start, args.end)
 
     if not chapters:
         print("没有可发布的章节")
         return
 
-    print(f"\n共 {len(chapters)} 章:")
+    print(f"\n书籍: {args.book} (ID: {book_id})")
+    print(f"共 {len(chapters)} 章:")
     for ch in chapters:
         print(f"  {ch.index}. {ch.title} ({len(ch.content)} 字)")
 
@@ -283,7 +342,8 @@ def main() -> None:
 
     print()
     asyncio.run(publish_all(
-        chapters, args.delay_min, args.delay_max,
+        chapters, args.book, book_id,
+        args.delay_min, args.delay_max,
         publish_time=publish_time,
         publish_interval=args.publish_interval,
     ))
