@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Data (screenshots, HTML captures, cookies, state files)
+data/*.png
+data/*.html
+data/cookies.json
+data/publish_state_*.json
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
